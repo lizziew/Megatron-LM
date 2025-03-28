@@ -111,3 +111,55 @@ class VocabUtility:
         return VocabUtility.vocab_range_from_per_partition_vocab_size(
             per_partition_vocab_size, rank, world_size
         )
+
+
+def get_embedding_norms_for_tensor_parallel(
+    model,
+    token_ids,
+    iteration,
+    get_min_median_max=True
+):
+    """Calculate the embedding norms for specified token IDs.
+    
+    Args:
+        model: The model containing the embeddings
+        token_ids: List of token IDs to get norms for
+        iteration: Current iteration (for logging)
+        get_min_median_max: Whether to calculate min/median/max stats
+        
+    Returns:
+        Dictionary mapping token IDs to their embedding norms and
+        stats dictionary with min/median/max/avg if requested
+    """
+    import torch
+    import numpy as np
+    from megatron.core.tensor_parallel.mappings import reduce_from_tensor_model_parallel_region
+    from megatron.core.parallel_state import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+    
+    if hasattr(model, 'embedding') and hasattr(model.embedding, 'word_embeddings'):
+        embedding_layer = model.embedding.word_embeddings
+    elif hasattr(model, 'language_model') and hasattr(model.language_model, 'embedding'):
+        embedding_layer = model.language_model.embedding.word_embeddings
+    else:
+        raise ValueError("Could not find embedding layer in model")
+    
+    tokens_tensor = torch.tensor(token_ids, dtype=torch.long, device=torch.cuda.current_device())
+    
+    with torch.no_grad():
+        embeddings = embedding_layer(tokens_tensor)  # [num_tokens, hidden_size]
+        
+        norms = torch.norm(embeddings, dim=1)  # [num_tokens]
+        
+    token_norms = {int(token_ids[i]): float(norms[i]) for i in range(len(token_ids))}
+    
+    stats = {}
+    if get_min_median_max and len(norms) > 0:
+        norms_np = norms.detach().cpu().numpy()
+        stats = {
+            'min': float(np.min(norms_np)),
+            'max': float(np.max(norms_np)),
+            'median': float(np.median(norms_np)),
+            'avg': float(np.mean(norms_np))
+        }
+    
+    return token_norms, stats

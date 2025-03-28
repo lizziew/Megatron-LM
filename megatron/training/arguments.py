@@ -1376,6 +1376,12 @@ def _add_logging_args(parser):
                        help='Path to save the wandb results locally.')
     group.add_argument('--logging-level', type=int, default=None,
                        help='Set default logging level')
+    group.add_argument('--log-embedding-norms-to-tensorboard', action='store_true',
+                       help='If set, the norms of token embeddings '
+                       'are added to tensorboard.')
+    group.add_argument('--log-embedding-norms-tokens', type=str, default=None,
+                       help='Comma-separated list of token ids to log embedding norms for, '
+                       'or "dummy" to use a predefined list of 100 tokens.')
     return parser
 
 

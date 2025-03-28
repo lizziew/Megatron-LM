@@ -1393,6 +1393,39 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
                               args.consumed_train_samples)
             if wandb_writer:
                 wandb_writer.log({'params-norm': params_norm}, iteration)
+                
+        if model and len(model) > 0:
+            try:
+                if hasattr(model[0].module, 'language_model') and hasattr(model[0].module.language_model, 'embedding'):
+                    vocab_size = model[0].module.language_model.embedding.word_embeddings.num_embeddings
+                    token_ids = list(range(0, vocab_size, max(1, vocab_size // 100)))[:100]
+                    
+                    from megatron.core.tensor_parallel.utils import get_embedding_norms_for_tensor_parallel
+                    token_norms, stats = get_embedding_norms_for_tensor_parallel(
+                        model[0].module.language_model, 
+                        token_ids, 
+                        iteration
+                    )
+                    
+                    for token_id, norm in token_norms.items():
+                        writer.add_scalar(f'embedding-norm-token-{token_id}', norm, iteration)
+                    
+                    writer.add_scalar('embedding-norm-min', stats['min'], iteration)
+                    writer.add_scalar('embedding-norm-max', stats['max'], iteration)
+                    writer.add_scalar('embedding-norm-median', stats['median'], iteration)
+                    writer.add_scalar('embedding-norm-avg', stats['avg'], iteration)
+                    
+                    if wandb_writer:
+                        wandb_writer.log({f'embedding-norm-token-{token_id}': norm for token_id, norm in token_norms.items()}, iteration)
+                        wandb_writer.log({
+                            'embedding-norm-min': stats['min'],
+                            'embedding-norm-max': stats['max'],
+                            'embedding-norm-median': stats['median'],
+                            'embedding-norm-avg': stats['avg']
+                        }, iteration)
+            except Exception as e:
+                print(f"Error logging embedding norms: {e}")
+                
         if args.log_memory_to_tensorboard:
             mem_stats = torch.cuda.memory_stats()
             writer.add_scalar(
