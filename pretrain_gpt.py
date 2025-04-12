@@ -44,7 +44,7 @@ def log_layernorm_grad_norm_before(layer_idx):
     """Hook function to log gradient norm for input to layernorm."""
     def hook(grad):
         grad_norm = torch.norm(grad.float())
-        print_rank_0(f'Layer {layer_idx} LayerNorm input dgrad gradnorm: {grad_norm}')
+        print_rank_0(f'Layer {layer_idx} LayerNorm input dgrad gradnorm: {grad_norm}, tensor shape: {grad.shape}')
         return grad
     return hook
 
@@ -52,14 +52,14 @@ def log_layernorm_grad_norm_after(layer_idx):
     """Hook function to log gradient norm for output of layernorm."""
     def hook(grad):
         grad_norm = torch.norm(grad.float())
-        print_rank_0(f'Layer {layer_idx} LayerNorm output dgrad gradnorm: {grad_norm}')
+        print_rank_0(f'Layer {layer_idx} LayerNorm output dgrad gradnorm: {grad_norm}, tensor shape: {grad.shape}')
         return grad
     return hook
 
 def log_activation_norm(hidden_states, layer_idx):
     """Log the norm of activations before layernorm."""
     activation_norm = torch.norm(hidden_states.float())
-    print_rank_0(f'Layer {layer_idx} activation norm before LayerNorm: {activation_norm}')
+    print_rank_0(f'Layer {layer_idx} activation norm before LayerNorm: {activation_norm}, tensor shape: {hidden_states.shape}')
     return hidden_states
 
 def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megatron.legacy.model.GPTModel]:
