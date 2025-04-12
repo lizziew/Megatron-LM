@@ -40,17 +40,27 @@ from megatron.core.transformer.transformer_block import TransformerBlockSubmodul
 
 stimer = StragglerDetector()
 
-def log_layernorm_grad_norm_before(grad):
-    """Hook function to log gradient norm for input to the first layernorm."""
-    grad_norm = torch.norm(grad)
-    print_rank_0(f'First LayerNorm input dgrad gradnorm: {grad_norm}')
-    return grad
+def log_layernorm_grad_norm_before(layer_idx):
+    """Hook function to log gradient norm for input to layernorm."""
+    def hook(grad):
+        grad_norm = torch.norm(grad)
+        print_rank_0(f'Layer {layer_idx} LayerNorm input dgrad gradnorm: {grad_norm}')
+        return grad
+    return hook
 
-def log_layernorm_grad_norm_after(grad):
-    """Hook function to log gradient norm for output of the first layernorm."""
-    grad_norm = torch.norm(grad)
-    print_rank_0(f'First LayerNorm output dgrad gradnorm: {grad_norm}')
-    return grad
+def log_layernorm_grad_norm_after(layer_idx):
+    """Hook function to log gradient norm for output of layernorm."""
+    def hook(grad):
+        grad_norm = torch.norm(grad)
+        print_rank_0(f'Layer {layer_idx} LayerNorm output dgrad gradnorm: {grad_norm}')
+        return grad
+    return hook
+
+def log_activation_norm(hidden_states, layer_idx):
+    """Log the norm of activations before layernorm."""
+    activation_norm = torch.norm(hidden_states)
+    print_rank_0(f'Layer {layer_idx} activation norm before LayerNorm: {activation_norm}')
+    return hidden_states
 
 def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megatron.legacy.model.GPTModel]:
     """Builds the model.
@@ -156,27 +166,43 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
             )
 
     if not args.use_legacy_models and mpu.is_pipeline_first_stage():
-        first_layer = model.decoder.layers[0]
+        num_layers = len(model.decoder.layers)
+        interval = max(1, num_layers // 4)  # Ensure we don't divide by zero
         
+        layers_to_monitor = []
+        for i in range(0, num_layers, interval):
+            layers_to_monitor.append(i)
         
-        original_input_layernorm_forward = first_layer.input_layernorm.forward
-        
-        def input_layernorm_forward_with_hooks(self, hidden_states):
-            if hidden_states.requires_grad:
-                hidden_states.register_hook(log_layernorm_grad_norm_before)
-                print_rank_0(f'Registered gradient norm logging hook on first layer\'s input (before layernorm)')
+        if (num_layers - 1) not in layers_to_monitor:
+            layers_to_monitor.append(num_layers - 1)
             
-            output = original_input_layernorm_forward(hidden_states)
-            
-            if output.requires_grad:
-                output.register_hook(log_layernorm_grad_norm_after)
-                print_rank_0(f'Registered gradient norm logging hook on first layer\'s output (after layernorm)')
-            
-            return output
+        print_rank_0(f'Setting up gradient norm and activation norm logging for layers at regular intervals: {layers_to_monitor}')
         
-        first_layer.input_layernorm.forward = lambda hidden_states: input_layernorm_forward_with_hooks(first_layer.input_layernorm, hidden_states)
+        for layer_idx in layers_to_monitor:
+            layer = model.decoder.layers[layer_idx]
+            original_input_layernorm_forward = layer.input_layernorm.forward
+            
+            def create_forward_with_hooks(layer, original_forward, idx):
+                def input_layernorm_forward_with_hooks(self, hidden_states):
+                    log_activation_norm(hidden_states, idx)
+                    
+                    if hidden_states.requires_grad:
+                        hidden_states.register_hook(log_layernorm_grad_norm_before(idx))
+                        print_rank_0(f'Registered gradient norm logging hook on layer {idx}\'s input (before layernorm)')
+                    
+                    output = original_forward(hidden_states)
+                    
+                    if output.requires_grad:
+                        output.register_hook(log_layernorm_grad_norm_after(idx))
+                        print_rank_0(f'Registered gradient norm logging hook on layer {idx}\'s output (after layernorm)')
+                    
+                    return output
+                return input_layernorm_forward_with_hooks
+            
+            layer.input_layernorm.forward = lambda hidden_states: create_forward_with_hooks(
+                layer, original_input_layernorm_forward, layer_idx)(layer.input_layernorm, hidden_states)
         
-        print_rank_0(f'Successfully set up gradient norm logging for first layer normalization')
+        print_rank_0(f'Successfully set up gradient norm and activation norm logging for multiple layer normalizations')
 
     return model
 
