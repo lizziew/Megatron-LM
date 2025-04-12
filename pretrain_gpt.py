@@ -43,23 +43,29 @@ stimer = StragglerDetector()
 def log_layernorm_grad_norm_before(layer_idx):
     """Hook function to log gradient norm for input to layernorm."""
     def hook(grad):
-        grad_norm = torch.norm(grad)
-        print_rank_0(f'Layer {layer_idx} LayerNorm input dgrad gradnorm: {grad_norm}')
+        grad_norm = torch.norm(grad.float())
+        args = get_args()
+        iteration = getattr(args, 'iteration', 0)
+        print_rank_0(f'Iteration {iteration} - Layer {layer_idx} LayerNorm input dgrad gradnorm: {grad_norm}')
         return grad
     return hook
 
 def log_layernorm_grad_norm_after(layer_idx):
     """Hook function to log gradient norm for output of layernorm."""
     def hook(grad):
-        grad_norm = torch.norm(grad)
-        print_rank_0(f'Layer {layer_idx} LayerNorm output dgrad gradnorm: {grad_norm}')
+        grad_norm = torch.norm(grad.float())
+        args = get_args()
+        iteration = getattr(args, 'iteration', 0)
+        print_rank_0(f'Iteration {iteration} - Layer {layer_idx} LayerNorm output dgrad gradnorm: {grad_norm}')
         return grad
     return hook
 
 def log_activation_norm(hidden_states, layer_idx):
     """Log the norm of activations before layernorm."""
-    activation_norm = torch.norm(hidden_states)
-    print_rank_0(f'Layer {layer_idx} activation norm before LayerNorm: {activation_norm}')
+    activation_norm = torch.norm(hidden_states.float())
+    args = get_args()
+    iteration = getattr(args, 'iteration', 0)
+    print_rank_0(f'Iteration {iteration} - Layer {layer_idx} activation norm before LayerNorm: {activation_norm}')
     return hidden_states
 
 def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megatron.legacy.model.GPTModel]:
@@ -179,21 +185,27 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
                 self.layer_idx = layer_idx
                 self.input_hook_registered = False
                 self.output_hook_registered = False
+                self.activation_logged = False  # Track if we've logged activation norm
                 print_rank_0(f'Initialized hook wrapper for layer {layer_idx}')
                 
             def __call__(self, hidden_states):
-                log_activation_norm(hidden_states, self.layer_idx)
+                args = get_args()
+                current_iteration = getattr(args, 'iteration', 0)
+                
+                if not self.activation_logged:
+                    log_activation_norm(hidden_states, self.layer_idx)
+                    self.activation_logged = True
                 
                 if not self.input_hook_registered and hidden_states.requires_grad:
                     hidden_states.register_hook(log_layernorm_grad_norm_before(self.layer_idx))
-                    print_rank_0(f'Registered gradient norm logging hook on layer {self.layer_idx}\'s input (before layernorm)')
+                    print_rank_0(f'Iteration {current_iteration} - Registered gradient norm logging hook on layer {self.layer_idx}\'s input')
                     self.input_hook_registered = True
                 
                 output = self.original_forward(hidden_states)
                 
                 if not self.output_hook_registered and output.requires_grad:
                     output.register_hook(log_layernorm_grad_norm_after(self.layer_idx))
-                    print_rank_0(f'Registered gradient norm logging hook on layer {self.layer_idx}\'s output (after layernorm)')
+                    print_rank_0(f'Iteration {current_iteration} - Registered gradient norm logging hook on layer {self.layer_idx}\'s output')
                     self.output_hook_registered = True
                 
                 return output
