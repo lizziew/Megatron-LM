@@ -178,29 +178,37 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
             
         print_rank_0(f'Setting up gradient norm and activation norm logging for layers at regular intervals: {layers_to_monitor}')
         
+        class LayerNormWithHooks:
+            def __init__(self, original_forward, layer_idx):
+                self.original_forward = original_forward
+                self.layer_idx = layer_idx
+                self.input_hook_registered = False
+                self.output_hook_registered = False
+                print_rank_0(f'Initialized hook wrapper for layer {layer_idx}')
+                
+            def __call__(self, hidden_states):
+                log_activation_norm(hidden_states, self.layer_idx)
+                
+                if not self.input_hook_registered and hidden_states.requires_grad:
+                    hidden_states.register_hook(log_layernorm_grad_norm_before(self.layer_idx))
+                    print_rank_0(f'Registered gradient norm logging hook on layer {self.layer_idx}\'s input (before layernorm)')
+                    self.input_hook_registered = True
+                
+                output = self.original_forward(hidden_states)
+                
+                if not self.output_hook_registered and output.requires_grad:
+                    output.register_hook(log_layernorm_grad_norm_after(self.layer_idx))
+                    print_rank_0(f'Registered gradient norm logging hook on layer {self.layer_idx}\'s output (after layernorm)')
+                    self.output_hook_registered = True
+                
+                return output
+        
         for layer_idx in layers_to_monitor:
             layer = model.decoder.layers[layer_idx]
             original_input_layernorm_forward = layer.input_layernorm.forward
             
-            def create_forward_with_hooks(layer, original_forward, idx):
-                def input_layernorm_forward_with_hooks(self, hidden_states):
-                    log_activation_norm(hidden_states, idx)
-                    
-                    if hidden_states.requires_grad:
-                        hidden_states.register_hook(log_layernorm_grad_norm_before(idx))
-                        print_rank_0(f'Registered gradient norm logging hook on layer {idx}\'s input (before layernorm)')
-                    
-                    output = original_forward(hidden_states)
-                    
-                    if output.requires_grad:
-                        output.register_hook(log_layernorm_grad_norm_after(idx))
-                        print_rank_0(f'Registered gradient norm logging hook on layer {idx}\'s output (after layernorm)')
-                    
-                    return output
-                return input_layernorm_forward_with_hooks
-            
-            layer.input_layernorm.forward = lambda hidden_states: create_forward_with_hooks(
-                layer, original_input_layernorm_forward, layer_idx)(layer.input_layernorm, hidden_states)
+            hook_wrapper = LayerNormWithHooks(original_input_layernorm_forward, layer_idx)
+            layer.input_layernorm.forward = hook_wrapper
         
         print_rank_0(f'Successfully set up gradient norm and activation norm logging for multiple layer normalizations')
 
