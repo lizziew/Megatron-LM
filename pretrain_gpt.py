@@ -187,24 +187,19 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
                     log_activation_norm(hidden_states, self.layer_idx)
                     self.activation_logged = True
                 
-                if hidden_states.requires_grad:
-                    input_tensor = hidden_states.detach().clone().requires_grad_(True)
-                    
-                    if not self.input_hook_registered:
-                        input_tensor.register_hook(log_layernorm_grad_norm_before(self.layer_idx))
-                        print_rank_0(f'Registered gradient norm logging hook on layer {self.layer_idx}\'s input')
-                        self.input_hook_registered = True
-                    
-                    output = self.original_forward(input_tensor)
-                    
-                    if not self.output_hook_registered:
-                        output.register_hook(log_layernorm_grad_norm_after(self.layer_idx))
-                        print_rank_0(f'Registered gradient norm logging hook on layer {self.layer_idx}\'s output')
-                        self.output_hook_registered = True
-                    
-                    return output
-                else:
-                    return self.original_forward(hidden_states)
+                if hidden_states.requires_grad and not self.input_hook_registered:
+                    hidden_states.register_hook(log_layernorm_grad_norm_before(self.layer_idx))
+                    print_rank_0(f'Registered gradient norm logging hook on layer {self.layer_idx}\'s input')
+                    self.input_hook_registered = True
+                
+                output = self.original_forward(hidden_states)
+                
+                if output.requires_grad and not self.output_hook_registered:
+                    output.register_hook(log_layernorm_grad_norm_after(self.layer_idx))
+                    print_rank_0(f'Registered gradient norm logging hook on layer {self.layer_idx}\'s output')
+                    self.output_hook_registered = True
+                
+                return output
         
         for layer_idx in layers_to_monitor:
             layer = model.decoder.layers[layer_idx]
