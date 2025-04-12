@@ -40,6 +40,18 @@ from megatron.core.transformer.transformer_block import TransformerBlockSubmodul
 
 stimer = StragglerDetector()
 
+def log_layernorm_grad_norm_before(grad):
+    """Hook function to log gradient norm for input to the first layernorm."""
+    grad_norm = torch.norm(grad)
+    print_rank_0(f'First LayerNorm input dgrad gradnorm: {grad_norm}')
+    return grad
+
+def log_layernorm_grad_norm_after(grad):
+    """Hook function to log gradient norm for output of the first layernorm."""
+    grad_norm = torch.norm(grad)
+    print_rank_0(f'First LayerNorm output dgrad gradnorm: {grad_norm}')
+    return grad
+
 def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megatron.legacy.model.GPTModel]:
     """Builds the model.
 
@@ -142,6 +154,29 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
                 rope_scaling=args.use_rope_scaling,
                 mtp_block_spec=mtp_block_spec,
             )
+
+    if not args.use_legacy_models and mpu.is_pipeline_first_stage():
+        first_layer = model.decoder.layers[0]
+        
+        
+        original_input_layernorm_forward = first_layer.input_layernorm.forward
+        
+        def input_layernorm_forward_with_hooks(self, hidden_states):
+            if hidden_states.requires_grad:
+                hidden_states.register_hook(log_layernorm_grad_norm_before)
+                print_rank_0(f'Registered gradient norm logging hook on first layer\'s input (before layernorm)')
+            
+            output = original_input_layernorm_forward(hidden_states)
+            
+            if output.requires_grad:
+                output.register_hook(log_layernorm_grad_norm_after)
+                print_rank_0(f'Registered gradient norm logging hook on first layer\'s output (after layernorm)')
+            
+            return output
+        
+        first_layer.input_layernorm.forward = lambda hidden_states: input_layernorm_forward_with_hooks(first_layer.input_layernorm, hidden_states)
+        
+        print_rank_0(f'Successfully set up gradient norm logging for first layer normalization')
 
     return model
 
