@@ -167,16 +167,11 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
 
     if not args.use_legacy_models and mpu.is_pipeline_first_stage():
         num_layers = len(model.decoder.layers)
-        interval = max(1, num_layers // 4)  # Ensure we don't divide by zero
+        print_rank_0(f'Number of layers in model: {num_layers}')
         
-        layers_to_monitor = []
-        for i in range(0, num_layers, interval):
-            layers_to_monitor.append(i)
-        
-        if (num_layers - 1) not in layers_to_monitor:
-            layers_to_monitor.append(num_layers - 1)
+        layers_to_monitor = [0, 8, 16, 24, min(31, num_layers-1)]
             
-        print_rank_0(f'Setting up gradient norm and activation norm logging for layers at regular intervals: {layers_to_monitor}')
+        print_rank_0(f'Setting up gradient norm and activation norm logging for specific layers: {layers_to_monitor}')
         
         class LayerNormWithHooks:
             def __init__(self, original_forward, layer_idx):
