@@ -40,6 +40,59 @@ from megatron.core.transformer.transformer_block import TransformerBlockSubmodul
 
 stimer = StragglerDetector()
 
+_patched_layers = set()
+
+def patch_layernorm_for_gradient_logging(model, layer_indices=None):
+    """
+    Patches specific transformer layers to use our non-fused LayerNorm implementation
+    that properly tracks and logs gradients.
+    
+    Args:
+        model: The model to patch
+        layer_indices: List of layer indices to patch. If None, only the first layer is patched.
+    """
+    from megatron.core.fusions.layernorm_with_grad_logging import LayerNormWithGradLogging
+    
+    if layer_indices is None:
+        layer_indices = [0]
+    
+    if not hasattr(model, 'decoder') or not hasattr(model.decoder, 'layers'):
+        print_rank_0(f"Model doesn't have expected structure. Cannot patch LayerNorm.")
+        return
+    
+    num_layers = len(model.decoder.layers)
+    print_rank_0(f"Model has {num_layers} layers")
+    
+    valid_indices = [idx for idx in layer_indices if 0 <= idx < num_layers]
+    print_rank_0(f"Patching LayerNorm for gradient logging in layers: {valid_indices}")
+    
+    for layer_idx in valid_indices:
+        if layer_idx in _patched_layers:
+            continue
+            
+        layer = model.decoder.layers[layer_idx]
+        if not hasattr(layer, 'input_layernorm'):
+            print_rank_0(f"Layer {layer_idx} doesn't have input_layernorm. Skipping.")
+            continue
+        
+        orig_ln = layer.input_layernorm
+        hidden_size = orig_ln.weight.shape[0]
+        eps = getattr(orig_ln, 'eps', 1e-5)
+        
+        custom_ln = LayerNormWithGradLogging(
+            hidden_size=hidden_size,
+            eps=eps,
+            weight=orig_ln.weight,  # Reuse the original weights
+            bias=orig_ln.bias,      # Reuse the original bias
+            layer_idx=layer_idx,
+        )
+        
+        layer.input_layernorm = custom_ln
+        _patched_layers.add(layer_idx)
+    
+    print_rank_0(f"Successfully patched LayerNorm in layers: {sorted(list(_patched_layers))}")
+
+
 def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megatron.legacy.model.GPTModel]:
     """Builds the model.
 
@@ -142,6 +195,19 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
                 rope_scaling=args.use_rope_scaling,
                 mtp_block_spec=mtp_block_spec,
             )
+
+    if not args.use_legacy_models and mpu.is_pipeline_first_stage():
+        layers_to_patch = [0]
+        if hasattr(model, 'decoder') and hasattr(model.decoder, 'layers'):
+            num_layers = len(model.decoder.layers)
+            if num_layers > 1:
+                layers_to_patch.extend([
+                    min(8, num_layers-1), 
+                    min(16, num_layers-1), 
+                    min(24, num_layers-1)
+                ])
+        
+        patch_layernorm_for_gradient_logging(model, layers_to_patch)
 
     return model
 
