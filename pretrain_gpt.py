@@ -177,38 +177,41 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
             def __init__(self, original_forward, layer_idx):
                 self.original_forward = original_forward
                 self.layer_idx = layer_idx
-                self.input_hook_registered = False
-                self.output_hook_registered = False
-                self.activation_logged = False  # Track if we've logged activation norm
+                self.activation_logged = False  # Track if we've logged activation norm for this iteration
                 print_rank_0(f'Initialized hook wrapper for layer {layer_idx}')
                 
             def __call__(self, hidden_states):
-                if not self.activation_logged:
-                    log_activation_norm(hidden_states, self.layer_idx)
+                from megatron.core.fusions.layernorm_with_grad_logging import apply_layernorm_with_grad_logging
+                
+                if hasattr(self.original_forward.__self__, 'weight'):
+                    weight = self.original_forward.__self__.weight
+                    bias = self.original_forward.__self__.bias
+                    eps = getattr(self.original_forward.__self__, 'eps', 1e-5)
+                else:
+                    weight = None
+                    bias = None
+                    eps = 1e-5
+                    
+                log_activation = not self.activation_logged
+                if log_activation:
                     self.activation_logged = True
-                
-                if hidden_states.requires_grad and not self.input_hook_registered:
-                    hidden_states.register_hook(log_layernorm_grad_norm_before(self.layer_idx))
-                    print_rank_0(f'Registered gradient norm logging hook on layer {self.layer_idx}\'s input')
-                    self.input_hook_registered = True
-                
-                output = self.original_forward(hidden_states)
-                
-                if output.requires_grad and not self.output_hook_registered:
-                    output.register_hook(log_layernorm_grad_norm_after(self.layer_idx))
-                    print_rank_0(f'Registered gradient norm logging hook on layer {self.layer_idx}\'s output')
-                    self.output_hook_registered = True
-                
-                return output
+                    
+                return apply_layernorm_with_grad_logging(
+                    hidden_states, weight, bias, eps, self.layer_idx, log_activation)
         
+        layernorm_hooks = []
+
         for layer_idx in layers_to_monitor:
             layer = model.decoder.layers[layer_idx]
             original_input_layernorm_forward = layer.input_layernorm.forward
             
             hook_wrapper = LayerNormWithHooks(original_input_layernorm_forward, layer_idx)
             layer.input_layernorm.forward = hook_wrapper
+            layernorm_hooks.append(hook_wrapper)  # Store the wrapper instance
         
         print_rank_0(f'Successfully set up gradient norm and activation norm logging for multiple layer normalizations')
+        
+        model_provider.layernorm_hooks = layernorm_hooks
 
     return model
 
@@ -311,6 +314,10 @@ def forward_step(data_iterator, model: GPTModel):
     args = get_args()
     timers = get_timers()
 
+    if hasattr(model_provider, 'layernorm_hooks'):
+        for hook in model_provider.layernorm_hooks:
+            hook.activation_logged = False
+
     # Get the batch.
     timers('batch-generator', log_level=2).start()
     global stimer
@@ -322,10 +329,10 @@ def forward_step(data_iterator, model: GPTModel):
     with stimer:
         if args.use_legacy_models:
             output_tensor = model(tokens, position_ids, attention_mask,
-                                labels=labels)
+                               labels=labels)
         else:
             output_tensor = model(tokens, position_ids, attention_mask,
-                                labels=labels, loss_mask=loss_mask)
+                               labels=labels, loss_mask=loss_mask)
 
     return output_tensor, partial(loss_func, loss_mask)
 
