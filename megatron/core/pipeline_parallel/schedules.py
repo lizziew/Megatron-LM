@@ -279,6 +279,9 @@ def forward_step(
             output_tensor, loss_func = forward_step_func(
                 data_iterator, model, checkpoint_activations_microbatch
             )
+            
+        if output_tensor is None:
+            return None, torch.tensor(0, dtype=torch.int)
 
     num_tokens = torch.tensor(0, dtype=torch.int)
     if parallel_state.is_pipeline_last_stage():
@@ -486,6 +489,10 @@ def forward_backward_no_pipelining(
                 is_first_microbatch=check_first_val_step(first_val_step, forward_only, i == 0),
                 current_microbatch=i,
             )
+            
+            if output_tensor is None:
+                continue
+                
             total_num_tokens += num_tokens.item()
             if not forward_only:
                 backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, config)
@@ -506,6 +513,10 @@ def forward_backward_no_pipelining(
         ),
         current_microbatch=num_microbatches - 1,
     )
+    
+    if output_tensor is None:
+        return forward_data_store
+        
     total_num_tokens += num_tokens.item()
 
     if not forward_only:

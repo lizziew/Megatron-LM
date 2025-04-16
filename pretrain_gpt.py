@@ -252,6 +252,10 @@ def forward_step(data_iterator, model: GPTModel):
             data_iterator)
     timers('batch-generator').stop()
 
+    if tokens is not None and not contains_target_token_ids(tokens, [1, 2, 3]):
+        print_rank_0('Skipping batch without target token IDs [1, 2, 3]')
+        return None, None
+
     with stimer:
         if args.use_legacy_models:
             output_tensor = model(tokens, position_ids, attention_mask,
@@ -267,6 +271,13 @@ def is_dataset_built_on_rank():
     return (
         mpu.is_pipeline_first_stage() or mpu.is_pipeline_last_stage()
     ) and mpu.get_tensor_model_parallel_rank() == 0
+
+
+def contains_target_token_ids(tokens, target_ids=[1, 2, 3]):
+    """Check if the tokens tensor contains any of the target token IDs."""
+    if tokens is None:
+        return False
+    return any(token_id in target_ids for token_id in torch.unique(tokens).tolist())
 
 
 def core_gpt_dataset_config_from_args(args):

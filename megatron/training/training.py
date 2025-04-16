@@ -1178,6 +1178,9 @@ def train_step(forward_step_func, data_iterator,
             micro_batch_size=args.micro_batch_size,
             decoder_seq_length=args.decoder_seq_length,
             forward_only=False)
+            
+        if losses_reduced is None:
+            losses_reduced = []
     should_checkpoint, should_exit, exit_code = rerun_state_machine.should_checkpoint_and_exit()
     if should_exit:
         return {}, True, should_checkpoint, should_exit, exit_code, None, None
