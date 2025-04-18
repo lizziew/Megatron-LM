@@ -153,6 +153,91 @@ def add_gradient_norm_hooks(model):
     from megatron.training.utils import print_rank_0
     import torch.distributed as dist
     
+    class CustomLayerNormFunction(torch.autograd.Function):
+        """Custom autograd function for LayerNorm that tracks gradients properly."""
+        
+        @staticmethod
+        def forward(ctx, input_tensor, weight, bias, eps, layer_idx=0):
+            ctx.eps = eps
+            ctx.layer_idx = layer_idx
+            ctx.save_for_backward(input_tensor, weight, bias)
+            
+            mean = input_tensor.mean(dim=-1, keepdim=True)
+            var = ((input_tensor - mean) ** 2).mean(dim=-1, keepdim=True)
+            
+            normalized = (input_tensor - mean) / torch.sqrt(var + eps)
+            
+            output = normalized * weight.unsqueeze(0) + bias.unsqueeze(0)
+            
+            return output
+        
+        @staticmethod
+        def backward(ctx, grad_output):
+            input_tensor, weight, bias = ctx.saved_tensors
+            eps = ctx.eps
+            layer_idx = ctx.layer_idx
+            
+            input_shape = input_tensor.size()
+            
+            mean = input_tensor.mean(dim=-1, keepdim=True)
+            var = ((input_tensor - mean) ** 2).mean(dim=-1, keepdim=True)
+            
+            try:
+                rank = dist.get_rank()
+                
+                if rank % 8 == 0:
+                    if len(grad_output.shape) >= 3:
+                        reshaped_grad = grad_output.reshape(-1, grad_output.size(-1))
+                    else:
+                        reshaped_grad = grad_output
+                        
+                    grad_norms = torch.norm(reshaped_grad.float(), dim=1)
+                    
+                    mean_norm = grad_norms.mean().item()
+                    max_norm = grad_norms.max().item()
+                    min_norm = grad_norms.min().item()
+                    
+                    print(f'LIZZIE rank: {rank}, Layer {layer_idx}, LayerNorm output dgrad stats, Reshaped shape: {reshaped_grad.shape}, Norms shape: {grad_norms.shape}, Mean norm: {mean_norm:.4g}, Min norm: {min_norm:.4g}, Max norm: {max_norm:.4g}')
+            except Exception as e:
+                print_rank_0(f"Error tracking output gradient: {str(e)}")
+            
+            batch_size = input_shape[:-1].numel()
+            hidden_dim = input_shape[-1]
+            
+            d_normalized = grad_output * weight.unsqueeze(0)
+            d_var = -0.5 * d_normalized * (input_tensor - mean) / torch.sqrt(var + eps)**3
+            d_var = d_var.sum(dim=-1, keepdim=True)
+            
+            d_mean_1 = -d_normalized / torch.sqrt(var + eps)
+            d_mean_2 = -2.0 * d_var * (input_tensor - mean) / hidden_dim
+            d_mean = d_mean_1.sum(dim=-1, keepdim=True) + d_mean_2.sum(dim=-1, keepdim=True)
+            
+            d_input = d_normalized / torch.sqrt(var + eps) + d_var * 2.0 * (input_tensor - mean) / hidden_dim + d_mean / hidden_dim
+            
+            d_weight = (grad_output * (input_tensor - mean) / torch.sqrt(var + eps)).sum(dim=tuple(range(len(input_shape) - 1)))
+            d_bias = grad_output.sum(dim=tuple(range(len(input_shape) - 1)))
+            
+            try:
+                rank = dist.get_rank()
+                
+                if rank % 8 == 0:
+                    if len(d_input.shape) >= 3:
+                        reshaped_grad = d_input.reshape(-1, d_input.size(-1))
+                    else:
+                        reshaped_grad = d_input
+                        
+                    grad_norms = torch.norm(reshaped_grad.float(), dim=1)
+                    
+                    mean_norm = grad_norms.mean().item()
+                    max_norm = grad_norms.max().item()
+                    min_norm = grad_norms.min().item()
+                    
+                    print(f'LIZZIE rank: {rank}, Layer {layer_idx}, LayerNorm input dgrad stats, Reshaped shape: {reshaped_grad.shape}, Norms shape: {grad_norms.shape}, Mean norm: {mean_norm:.4g}, Min norm: {min_norm:.4g}, Max norm: {max_norm:.4g}')
+            except Exception as e:
+                print_rank_0(f"Error tracking input gradient: {str(e)}")
+            
+            return d_input, d_weight, d_bias, None, None
+    
     if not hasattr(model[0].module.module.decoder, 'layers') or len(model[0].module.module.decoder.layers) == 0:
         print_rank_0("Warning: Unable to find transformer layers in the model")
         return
@@ -162,58 +247,22 @@ def add_gradient_norm_hooks(model):
         print_rank_0("Warning: First layer does not have input_layernorm")
         return
     
-    input_tensor_ref = None
-    layernorm_output_ref = None
+    layernorm = first_layer.input_layernorm
     
-    def process_grad(grad, position):
-        """Process gradients and log statistics."""
-        if grad is None:
-            return grad
-            
-        try:
-            rank = dist.get_rank()
-            
-            if len(grad.shape) >= 3:
-                reshaped_grad = grad.reshape(-1, grad.size(-1))
-            else:
-                reshaped_grad = grad
-                print_rank_0(f"Warning: Unexpected gradient shape for {position}: {grad.shape}")
-            
-            grad_norms = torch.norm(reshaped_grad, p=2, dim=1)
-            
-            mean_norm = grad_norms.mean().item()
-            max_norm = grad_norms.max().item()
-            min_norm = grad_norms.min().item()
-            
-            print_rank_0(f"Rank: {rank}, Layer 0 Input Layernorm {position} dgrad Norms - Mean: {mean_norm:.6f}, Max: {max_norm:.6f}, Min: {min_norm:.6f}")
-        except Exception as e:
-            print_rank_0(f"Error in gradient norm hook for {position}: {str(e)}")
-            
-        return grad
+    original_forward = layernorm.forward
     
-    original_forward = first_layer.input_layernorm.forward
+    def custom_forward(self, hidden_states):
+        return CustomLayerNormFunction.apply(
+            hidden_states, 
+            self.weight,
+            self.bias,
+            self.eps,
+            0  # layer_idx=0 for the first layer
+        )
     
-    def wrapped_forward(self, hidden_states):
-        """Wrapped forward method to capture input and output for gradient tracking."""
-        nonlocal input_tensor_ref, layernorm_output_ref
-        
-        input_tensor_ref = hidden_states
-        
-        if hasattr(hidden_states, 'requires_grad') and hidden_states.requires_grad:
-            hidden_states.register_hook(lambda grad: process_grad(grad, "AFTER"))
-        
-        output = original_forward(hidden_states)
-        
-        layernorm_output_ref = output
-        
-        if hasattr(output, 'requires_grad') and output.requires_grad:
-            output.register_hook(lambda grad: process_grad(grad, "BEFORE"))
-        
-        return output
+    first_layer.input_layernorm.forward = lambda hidden_states: custom_forward(first_layer.input_layernorm, hidden_states)
     
-    first_layer.input_layernorm.forward = lambda hidden_states: wrapped_forward(first_layer.input_layernorm, hidden_states)
-    
-    print_rank_0("Added gradient norm tracking hooks to first layer's input_layernorm with direct tensor monitoring")
+    print_rank_0("Added custom LayerNorm with gradient tracking to first layer's input_layernorm")
 
 
 def get_batch(data_iterator):
