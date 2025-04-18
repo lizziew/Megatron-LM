@@ -143,7 +143,74 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
                 mtp_block_spec=mtp_block_spec,
             )
 
+    add_gradient_norm_hooks(model)
+
     return model
+
+
+def add_gradient_norm_hooks(model):
+    """Add backward hooks to track gradient norms for the first layer's input_layernorm."""
+    from megatron.training.utils import print_rank_0
+    import torch.distributed as dist
+    
+    if not hasattr(model[0].module.module.decoder, 'layers') or len(model[0].module.module.decoder.layers) == 0:
+        print_rank_0("Warning: Unable to find transformer layers in the model")
+        return
+        
+    first_layer = model[0].module.module.decoder.layers[0]
+    if not hasattr(first_layer, 'input_layernorm'):
+        print_rank_0("Warning: First layer does not have input_layernorm")
+        return
+    
+    def process_grad(grad, position):
+        """Process gradients and log statistics."""
+        if grad is None:
+            return grad
+            
+        try:
+            rank = dist.get_rank()
+            
+            if len(grad.shape) >= 3:
+                reshaped_grad = grad.reshape(-1, grad.size(-1))
+            else:
+                reshaped_grad = grad
+                print_rank_0(f"Warning: Unexpected gradient shape for {position}: {grad.shape}")
+            
+            grad_norms = torch.norm(reshaped_grad, p=2, dim=1)
+            
+            mean_norm = grad_norms.mean().item()
+            max_norm = grad_norms.max().item()
+            min_norm = grad_norms.min().item()
+            
+            print_rank_0(f"Rank: {rank}, Layer 0 Input Layernorm {position} dgrad Norms - Mean: {mean_norm:.6f}, Max: {max_norm:.6f}, Min: {min_norm:.6f}")
+        except Exception as e:
+            print_rank_0(f"Error in gradient norm hook for {position}: {str(e)}")
+            
+        return grad
+    
+    def input_hook(grad):
+        return process_grad(grad, "AFTER")
+    
+    def output_hook(grad):
+        return process_grad(grad, "BEFORE")
+    
+    def input_forward_pre_hook(module, input_tensor):
+        """Forward pre-hook to attach backward hook to the input tensor."""
+        if input_tensor and isinstance(input_tensor, tuple) and len(input_tensor) > 0:
+            if hasattr(input_tensor[0], 'requires_grad') and input_tensor[0].requires_grad:
+                input_tensor[0].register_hook(input_hook)
+        return None
+    
+    def output_forward_hook(module, input_tensor, output_tensor):
+        """Forward hook to attach backward hook to the output tensor."""
+        if hasattr(output_tensor, 'requires_grad') and output_tensor.requires_grad:
+            output_tensor.register_hook(output_hook)
+        return None
+    
+    first_layer.input_layernorm.register_forward_pre_hook(input_forward_pre_hook)
+    first_layer.input_layernorm.register_forward_hook(output_forward_hook)
+    
+    print_rank_0("Added gradient norm tracking hooks to first layer's input_layernorm (both before and after)")
 
 
 def get_batch(data_iterator):
