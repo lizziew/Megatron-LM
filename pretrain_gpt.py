@@ -162,6 +162,9 @@ def add_gradient_norm_hooks(model):
         print_rank_0("Warning: First layer does not have input_layernorm")
         return
     
+    input_tensor_ref = None
+    layernorm_output_ref = None
+    
     def process_grad(grad, position):
         """Process gradients and log statistics."""
         if grad is None:
@@ -188,29 +191,29 @@ def add_gradient_norm_hooks(model):
             
         return grad
     
-    def input_hook(grad):
-        return process_grad(grad, "AFTER")
+    original_forward = first_layer.input_layernorm.forward
     
-    def output_hook(grad):
-        return process_grad(grad, "BEFORE")
+    def wrapped_forward(self, hidden_states):
+        """Wrapped forward method to capture input and output for gradient tracking."""
+        nonlocal input_tensor_ref, layernorm_output_ref
+        
+        input_tensor_ref = hidden_states
+        
+        if hasattr(hidden_states, 'requires_grad') and hidden_states.requires_grad:
+            hidden_states.register_hook(lambda grad: process_grad(grad, "AFTER"))
+        
+        output = original_forward(hidden_states)
+        
+        layernorm_output_ref = output
+        
+        if hasattr(output, 'requires_grad') and output.requires_grad:
+            output.register_hook(lambda grad: process_grad(grad, "BEFORE"))
+        
+        return output
     
-    def input_forward_pre_hook(module, input_tensor):
-        """Forward pre-hook to attach backward hook to the input tensor."""
-        if input_tensor and isinstance(input_tensor, tuple) and len(input_tensor) > 0:
-            if hasattr(input_tensor[0], 'requires_grad') and input_tensor[0].requires_grad:
-                input_tensor[0].register_hook(input_hook)
-        return None
+    first_layer.input_layernorm.forward = lambda hidden_states: wrapped_forward(first_layer.input_layernorm, hidden_states)
     
-    def output_forward_hook(module, input_tensor, output_tensor):
-        """Forward hook to attach backward hook to the output tensor."""
-        if hasattr(output_tensor, 'requires_grad') and output_tensor.requires_grad:
-            output_tensor.register_hook(output_hook)
-        return None
-    
-    first_layer.input_layernorm.register_forward_pre_hook(input_forward_pre_hook)
-    first_layer.input_layernorm.register_forward_hook(output_forward_hook)
-    
-    print_rank_0("Added gradient norm tracking hooks to first layer's input_layernorm (both before and after)")
+    print_rank_0("Added gradient norm tracking hooks to first layer's input_layernorm with direct tensor monitoring")
 
 
 def get_batch(data_iterator):
