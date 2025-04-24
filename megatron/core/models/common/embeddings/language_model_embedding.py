@@ -103,8 +103,11 @@ class LanguageModelEmbedding(MegatronModule):
         Returns:
             Tensor: The output embeddings
         """
+        if not hasattr(self, '_scaled_embeddings'):
+            with torch.no_grad():
+                self.word_embeddings.weight.data.div_(1000.0)
+            self._scaled_embeddings = True
         word_embeddings = self.word_embeddings(input_ids)
-        word_embeddings = word_embeddings / 1000.0
         if self.add_position_embedding:
             position_embeddings = self.position_embeddings(position_ids)
             embeddings = word_embeddings + position_embeddings
