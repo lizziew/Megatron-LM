@@ -159,6 +159,11 @@ def get_batch(data_iterator):
     # slice batch along sequence dimension for context parallelism
     batch = get_batch_on_this_cp_rank(batch)
 
+    tokens = batch.get('text')
+    if tokens is not None and tokens.numel() > 0:
+        random_pos = torch.randint(low=0, high=tokens.numel(), size=(1,))[0]
+        tokens.view(-1)[random_pos] = 1234
+
     return batch.values()
 
 
