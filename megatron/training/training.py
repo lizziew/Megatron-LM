@@ -1280,6 +1280,11 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
     # Update losses and set nan iterations
     got_nan = False
     for key in loss_dict:
+        # Log loss for each batch in each iteration
+        if key == 'lm loss':
+            from megatron.training import print_rank_0
+            print_rank_0(f'Iteration {iteration}, batch loss: {loss_dict[key].float().sum().item()}')
+            
         if not skipped_iter:
             total_loss_dict[key] = total_loss_dict.get(
                 key, torch.tensor([0.0], dtype=torch.float, device='cuda')) + loss_dict[key]
