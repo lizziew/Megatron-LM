@@ -147,38 +147,18 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
                 """Log wgrad of embedding layer"""
                 rank = torch.distributed.get_rank()
                 if rank != 8:
-                    return 
+                    return lambda grad: None 
                     
                 def hook_fn(grad):
                     print_rank_0(f'Layer 0 embedding wgrad shape: {grad.shape}')
-                    return grad
-                    
+                    return None 
+
                 return hook_fn
 
-            class EmbeddingLayerWithHooks:
-                def __init__(self, original_forward, layer_idx):
-                    self.original_forward = original_forward
-                    self.layer_idx = layer_idx
-                    print_rank_0(f'Initialized hook wrapper for layer {layer_idx}')
-
-                def __call__(self, *args, **kwargs):
-                    output = self.original_forward(*args, **kwargs)
-                    
-                    if self.layer_idx == 0:  # Only for layer 0
-                        weight = self.original_forward.__self__.word_embeddings.weight
-                        if weight.requires_grad:
-                            weight.register_hook(log_embedding_wgrad())
-                            
-                    return output
-
-            decoder = model.decoder
-            if hasattr(decoder, 'layers') and len(decoder.layers) > 0:
-                layer = decoder.layers[0]
-                if hasattr(layer, 'embedding'):
-                    original_embedding_layer_forward = layer.embedding.forward
-                    hook_wrapper = EmbeddingLayerWithHooks(original_embedding_layer_forward, 0)
-                    layer.embedding.forward = hook_wrapper
-                    print_rank_0('Successfully registered embedding wgrad hook for layer 0')
+            embedding_weight = model.embedding.word_embeddings.weight
+            if embedding_weight.requires_grad:
+                embedding_weight.register_hook(log_embedding_wgrad())
+                print_rank_0("Registered hook for model.embedding.word_embeddings.weight")
 
     return model
 
